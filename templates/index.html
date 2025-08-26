@@ -268,27 +268,74 @@ async function downloadCsv(){
   }
 }
 
-/* ---------- Tables & Schemas ---------- */
+/* ---------- Tables & Schemas (UPDATED to include indexes & partitions) ---------- */
 function renderTablesPanel(data){
   if(data.error){
     tablesPanel.innerHTML = `<div class="error">${escapeHtml(data.error)}</div>`;
     return;
   }
-  const { schema, tables, ddl } = data;
+  const { schema, tables, ddl, indexes = {}, partitions = {} } = data;
   if(!tables || tables.length === 0){
     tablesPanel.innerHTML = `<div class="meta">No base tables found in schema <code>${escapeHtml(schema)}</code>.</div>`;
     return;
   }
+
   tablesPanel.innerHTML = `
     <div class="small-meta">Schema: <code>${escapeHtml(schema)}</code> • ${tables.length} table(s)</div>
-    ${tables.map(name => `
-      <details>
-        <summary>${escapeHtml(name)}</summary>
-        <pre class="ddl"><code>${escapeHtml(ddl?.[name] || '')}</code></pre>
-      </details>
-    `).join('')}
+    ${tables.map(name => {
+      const idxs = indexes?.[name] || [];
+      const part = partitions?.[name] || {};
+      const isPartitioned = !!part.is_partitioned;
+      const isPartition   = !!part.is_partition;
+
+      const partHeader = isPartitioned
+        ? `Partitioned (${escapeHtml(part.strategy || 'unknown')}${part.key_columns && part.key_columns.length ? ` on (${part.key_columns.map(escapeHtml).join(', ')})` : ''})`
+        : (isPartition ? `Partition of ${escapeHtml(part.parent || '')}` : '');
+
+      const childrenHtml = (part.children && part.children.length)
+        ? `<div class="small-meta" style="margin-top:6px;"><strong>Partitions</strong></div>
+           <table>
+             <thead><tr><th>Name</th><th>Bounds</th></tr></thead>
+             <tbody>
+              ${part.children.map(ch => `
+                <tr><td>${escapeHtml(ch.name)}</td><td>${escapeHtml(ch.bounds || '')}</td></tr>
+              `).join('')}
+             </tbody>
+           </table>`
+        : '';
+
+      const idxHtml = idxs.length
+        ? `<div class="small-meta" style="margin-top:6px;"><strong>Indexes</strong> (${idxs.length})</div>
+           <table>
+             <thead><tr><th>Name</th><th>Definition</th></tr></thead>
+             <tbody>
+               ${idxs.map(ix => `
+                 <tr>
+                   <td>${escapeHtml(ix.name)}</td>
+                   <td><code>${escapeHtml(ix.def || '')}</code></td>
+                 </tr>`).join('')}
+             </tbody>
+           </table>`
+        : '';
+
+      const partitionMeta = isPartitioned || isPartition
+        ? `<div class="small-meta" style="margin-top:6px;"><strong>Partition Info</strong>: ${escapeHtml(partHeader)}</div>
+           ${isPartition && part.bounds ? `<div class="small-meta">Bounds: <code>${escapeHtml(part.bounds)}</code></div>` : ''}
+           ${childrenHtml}`
+        : '';
+
+      return `
+        <details>
+          <summary>${escapeHtml(name)}</summary>
+          <pre class="ddl"><code>${escapeHtml(ddl?.[name] || '')}</code></pre>
+          ${idxHtml}
+          ${partitionMeta}
+        </details>
+      `;
+    }).join('')}
   `;
 }
+
 async function loadTableSchemas(){
   const schema = schemaSelect.value || 'public';
   tablesPanel.textContent = 'Loading…';

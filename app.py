@@ -80,20 +80,121 @@ def api_connect_to():
 def api_table_schemas():
     """
     Returns all base tables in the given schema and their CREATE TABLE DDL,
-    using aws_db_connection.list_table_schemas().
+    plus index and partition metadata.
     """
     schema = request.args.get("schema", "public")
     try:
-        mapping = db.list_table_schemas(schema=schema)  # {table_name: CREATE TABLE ...;}
-        # Sort by table name for stable UI
+        # Existing: use your helper to get CREATE TABLE DDL
+        mapping = db.list_table_schemas(schema=schema)  # {table_name: CREATE TABLE ...}
         ordered_items = sorted(mapping.items(), key=lambda kv: kv[0])
+        table_names = [name for name, _ in ordered_items]
+
+        indexes: dict[str, list[dict]] = {t: [] for t in table_names}
+        partitions: dict[str, dict] = {t: {} for t in table_names}
+
+        with db.conn.cursor() as cur:
+            # ---- Indexes for all tables in schema
+            cur.execute(
+                """
+                SELECT tablename, indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = %s
+                ORDER BY tablename, indexname;
+                """,
+                (schema,),
+            )
+            for tablename, indexname, indexdef in cur.fetchall():
+                if tablename in indexes:
+                    indexes[tablename].append({"name": indexname, "def": indexdef})
+
+            # ---- Partitioned parents: strategy + key columns
+            cur.execute(
+                """
+                WITH part AS (
+                  SELECT
+                    c.relname AS tablename,
+                    CASE pt.partstrat
+                      WHEN 'l' THEN 'LIST'
+                      WHEN 'r' THEN 'RANGE'
+                      WHEN 'h' THEN 'HASH'
+                    END AS strategy,
+                    pt.partattrs
+                  FROM pg_partitioned_table pt
+                  JOIN pg_class c ON c.oid = pt.partrelid
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = %s
+                )
+                SELECT
+                  p.tablename,
+                  p.strategy,
+                  array_agg(a.attname ORDER BY a.attnum) AS key_columns
+                FROM part p
+                JOIN pg_class c ON c.relname = p.tablename
+                JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = %s
+                JOIN unnest(p.partattrs) WITH ORDINALITY AS pa(attnum, ord) ON true
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = pa.attnum
+                GROUP BY p.tablename, p.strategy
+                ORDER BY p.tablename;
+                """,
+                (schema, schema),
+            )
+            for tablename, strategy, key_columns in cur.fetchall():
+                if tablename in partitions:
+                    partitions[tablename].update({
+                        "is_partitioned": True,
+                        "strategy": strategy,
+                        "key_columns": key_columns or [],
+                        "children": [],
+                    })
+
+            # ---- Children (the actual partitions) with bounds; also record parent links
+            cur.execute(
+                """
+                SELECT
+                  parent.relname AS parent,
+                  child.relname  AS partition_name,
+                  pg_get_expr(child.relpartbound, child.oid, true) AS bounds
+                FROM pg_inherits i
+                JOIN pg_class child  ON child.oid = i.inhrelid
+                JOIN pg_class parent ON parent.oid = i.inhparent
+                JOIN pg_namespace np ON np.oid = parent.relnamespace
+                JOIN pg_namespace nc ON nc.oid = child.relnamespace
+                WHERE np.nspname = %s AND nc.nspname = %s
+                ORDER BY parent.relname, child.relname;
+                """,
+                (schema, schema),
+            )
+            rows = cur.fetchall()
+            # Add child listing to parents, and mark children as partitions
+            for parent, child, bounds in rows:
+                if parent in partitions:
+                    if not partitions[parent].get("is_partitioned"):
+                        partitions[parent].update({
+                            "is_partitioned": True,
+                            "strategy": None,
+                            "key_columns": [],
+                            "children": [],
+                        })
+                    partitions[parent]["children"].append({
+                        "name": child, "bounds": bounds or ""
+                    })
+                if child in partitions:
+                    partitions[child].update({
+                        "is_partition": True,
+                        "parent": parent,
+                        "bounds": bounds or "",
+                    })
+
         return jsonify({
             "schema": schema,
-            "tables": [name for name, _ in ordered_items],
+            "tables": table_names,
             "ddl": {name: ddl for name, ddl in ordered_items},
+            "indexes": indexes,
+            "partitions": partitions,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
 
 
 # ----------------------------- SQL & CSV ---------------------------
@@ -146,4 +247,4 @@ def healthz():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
