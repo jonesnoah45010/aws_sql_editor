@@ -5,7 +5,9 @@ import psycopg2
 from psycopg2 import sql
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env only in local/dev; won't do anything in App Runner
+load_dotenv(override=False)
+
 
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT") or 5432
