@@ -1,0 +1,49 @@
+# apprunner.yaml
+version: 1.0
+runtime: python3
+
+build:
+  commands:
+    build:
+      - pip install --no-cache-dir -r requirements.txt
+
+run:
+  # Start the Flask app using Gunicorn in production
+  command: gunicorn -w 2 -k gthread -b 0.0.0.0:${PORT:-8080} app:app
+
+  network:
+    port: 8080
+
+  # Non-sensitive env vars can go here directly (optional)
+  env:
+    - name: DB_PORT
+      value: "5432"
+    - name: DB_HOST
+      value: test.clukwqgisdyo.us-east-2.rds.amazonaws.com
+    - name: DB_NAME
+      value: postgres
+    - name: DB_USER
+      value: test
+    - name: DB_PASS
+      value: PoopPoop42!
+
+
+  # Sensitive vars should come from AWS Secrets Manager or SSM
+  # Replace the ARNs below with your own
+  # Uncomment and edit as needed
+  # secrets:
+  #   - name: DB_HOST
+  #     value-from: arn:aws:ssm:us-east-2:123456789012:parameter/prod/db/host
+  #   - name: DB_NAME
+  #     value-from: arn:aws:ssm:us-east-2:123456789012:parameter/prod/db/name
+  #   - name: DB_USER
+  #     value-from: arn:aws:ssm:us-east-2:123456789012:parameter/prod/db/user
+  #   - name: DB_PASS
+  #     value-from: arn:aws:secretsmanager:us-east-2:123456789012:secret:prod/db/pass
+
+
+  # Alternatively, use a single DATABASE_URL
+  # secrets:
+  #   - name: DATABASE_URL
+  #     value-from: arn:aws:secretsmanager:us-east-2:123456789012:secret:prod/db/url
+
